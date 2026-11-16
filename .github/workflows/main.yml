@@ -29,8 +29,8 @@ jobs:
 
       - name: 2. Генерація звіту покриття (lcov)
         run: |
-          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov
-          lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage.info --ignore-errors unused
+          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov,negative,inconsistent
+          lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage.info --ignore-errors unused,negative,inconsistent
           lcov --list coverage.info
 
       - name: 3. Відправка звіту в Codecov
