@@ -23,13 +23,14 @@ jobs:
 
       - name: 1. Збірка з підтримкою Code Coverage та прогін тестів
         run: |
-          g++ -std=c++20 -O0 -g --coverage -Iinclude src/*.cpp tests/test_main.cpp -lpthread -o build_cov_tests
+          make clean
+          g++ -std=c++20 -O0 -g --coverage -Iinclude -Isrc $(find src -name '*.cpp' ! -name 'main.cpp') $(find tests -name '*.cpp') -lpthread -o build_cov_tests
           ./build_cov_tests
 
       - name: 2. Генерація звіту покриття (lcov)
         run: |
-          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch
-          lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage.info
+          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch,gcov
+          lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage.info --ignore-errors unused
           lcov --list coverage.info
 
       - name: 3. Відправка звіту в Codecov
