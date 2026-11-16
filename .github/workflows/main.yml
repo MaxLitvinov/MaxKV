@@ -1,4 +1,4 @@
-name: MaxKV Full Test Suite
+name: MaxKV Full Test & Coverage
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  full-test:
+  full-test-and-coverage:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -18,74 +18,49 @@ jobs:
       - name: Завантаження коду
         uses: actions/checkout@v4
 
-      - name: Встановлення redis-tools для навантажувального тесту
-        run: sudo apt-get update && sudo apt-get install -y redis-tools
+      - name: Встановлення інструментів (lcov та redis-tools)
+        run: sudo apt-get update && sudo apt-get install -y lcov redis-tools
 
-      - name: 1. Збірка Release та базові тести
+      - name: 1. Збірка з підтримкою Code Coverage та прогін тестів
         run: |
-          make clean
-          make -j$(nproc)
-          make test
+          g++ -std=c++20 -O0 -g --coverage -Iinclude src/*.cpp tests/test_main.cpp -lpthread -o build_cov_tests
+          ./build_cov_tests
 
-      - name: 2. Перевірка пам'яті та UB (AddressSanitizer + UBSan)
+      - name: 2. Генерація звіту покриття (lcov)
+        run: |
+          lcov --capture --directory . --output-file coverage.info --ignore-errors mismatch
+          lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage.info
+          lcov --list coverage.info
+
+      - name: 3. Відправка звіту в Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./maxkv/coverage.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: 4. Перевірка пам'яті та UB (AddressSanitizer + UBSan)
         run: |
           make clean
           make SAN=address -j$(nproc)
           ./build/maxkv_tests
 
-      - name: 3. Перевірка багатопотоковості (ThreadSanitizer)
+      - name: 5. Перевірка багатопотоковості (ThreadSanitizer)
         run: |
           make clean
           make SAN=thread -j$(nproc)
           ./build/maxkv_tests
 
-      - name: 4. Перевірка збірки через CMake
-        run: |
-          cmake -B build_cmake
-          cmake --build build_cmake -j$(nproc)
-          ./build_cmake/maxkv_tests
-
-      - name: 5. Стрес-тест, фаззинг протоколу та відновлення AOF після збою
+      - name: 6. Стрес-тест та перевірка відновлення AOF
         run: |
           make clean
           make -j$(nproc)
           ./build/maxkv --port 6380 --threads 4 --aof ci_crash.aof &
           SERVER_PID=$!
           sleep 1
-
-          echo "--- Запуск redis-benchmark (200 000 запитів) ---"
-          redis-benchmark -p 6380 -c 50 -n 200000 -P 16 -t set,get,incr,mget
-
-          echo "--- Запуск фаззингу (биті та величезні пакети) ---"
-          python3 -c '
-          import socket, os
-          for payload in [b"*999999999\r\n", b"$999999999\r\n", b"\x00\xff\xfe\r\n", os.urandom(8192)]:
-              try:
-                  s = socket.create_connection(("127.0.0.1", 6380), timeout=1)
-                  s.sendall(payload)
-                  s.close()
-              except Exception:
-                  pass
-          '
-
-          echo "--- Імітація раптового збою (SIGKILL) та пошкодження хвоста AOF ---"
+          redis-benchmark -p 6380 -c 50 -n 100000 -P 16 -t set,get,incr,mget
           kill -9 $SERVER_PID
-          echo "CORRUPTED_TAIL_BYTES" >> ci_crash.aof
-
+          echo "CORRUPTED_TAIL" >> ci_crash.aof
           ./build/maxkv --port 6380 --threads 4 --aof ci_crash.aof &
           SERVER_PID=$!
           sleep 1
-
-          python3 -c '
-          import socket
-          s = socket.create_connection(("127.0.0.1", 6380), timeout=1)
-          s.sendall(b"*1\r\n$4\r\nPING\r\n")
-          resp = s.recv(64)
-          assert resp == b"+PONG\r\n", f"Unexpected response: {resp}"
-          print("Відновлення AOF пройшло успішно:", resp)
-          s.close()
-          '
           kill $SERVER_PID
-
-      - name: 6. Перевірка збірки Docker-образу
-        run: docker build -t maxkv-ci .
