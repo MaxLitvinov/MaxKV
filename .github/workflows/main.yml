@@ -1,0 +1,91 @@
+name: MaxKV Full Test Suite
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  full-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./maxkv
+
+    steps:
+      - name: Завантаження коду
+        uses: actions/checkout@v4
+
+      - name: Встановлення redis-tools для навантажувального тесту
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: 1. Збірка Release та базові тести
+        run: |
+          make clean
+          make -j$(nproc)
+          make test
+
+      - name: 2. Перевірка пам'яті та UB (AddressSanitizer + UBSan)
+        run: |
+          make clean
+          make SAN=address -j$(nproc)
+          ./build/maxkv_tests
+
+      - name: 3. Перевірка багатопотоковості (ThreadSanitizer)
+        run: |
+          make clean
+          make SAN=thread -j$(nproc)
+          ./build/maxkv_tests
+
+      - name: 4. Перевірка збірки через CMake
+        run: |
+          cmake -B build_cmake
+          cmake --build build_cmake -j$(nproc)
+          ./build_cmake/maxkv_tests
+
+      - name: 5. Стрес-тест, фаззинг протоколу та відновлення AOF після збою
+        run: |
+          make clean
+          make -j$(nproc)
+          ./build/maxkv --port 6380 --threads 4 --aof ci_crash.aof &
+          SERVER_PID=$!
+          sleep 1
+
+          echo "--- Запуск redis-benchmark (200 000 запитів) ---"
+          redis-benchmark -p 6380 -c 50 -n 200000 -P 16 -t set,get,incr,mget
+
+          echo "--- Запуск фаззингу (биті та величезні пакети) ---"
+          python3 -c '
+          import socket, os
+          for payload in [b"*999999999\r\n", b"$999999999\r\n", b"\x00\xff\xfe\r\n", os.urandom(8192)]:
+              try:
+                  s = socket.create_connection(("127.0.0.1", 6380), timeout=1)
+                  s.sendall(payload)
+                  s.close()
+              except Exception:
+                  pass
+          '
+
+          echo "--- Імітація раптового збою (SIGKILL) та пошкодження хвоста AOF ---"
+          kill -9 $SERVER_PID
+          echo "CORRUPTED_TAIL_BYTES" >> ci_crash.aof
+
+          ./build/maxkv --port 6380 --threads 4 --aof ci_crash.aof &
+          SERVER_PID=$!
+          sleep 1
+
+          python3 -c '
+          import socket
+          s = socket.create_connection(("127.0.0.1", 6380), timeout=1)
+          s.sendall(b"*1\r\n$4\r\nPING\r\n")
+          resp = s.recv(64)
+          assert resp == b"+PONG\r\n", f"Unexpected response: {resp}"
+          print("Відновлення AOF пройшло успішно:", resp)
+          s.close()
+          '
+          kill $SERVER_PID
+
+      - name: 6. Перевірка збірки Docker-образу
+        run: docker build -t maxkv-ci .
